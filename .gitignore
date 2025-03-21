@@ -1,0 +1,12 @@
+/.venv
+/all_embeddings.pkl
+/aves_cache
+/bm25_scores.pkl
+/claude_input.csv
+/client_secret.json
+/competitor_data_for_stripe_reporting_20-03-2025.csv
+/html_from_sf
+/test.py
+/token.json
+/_unittest.py
+/__pycache__
