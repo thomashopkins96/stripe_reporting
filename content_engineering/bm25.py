@@ -1,5 +1,6 @@
+# content_engineering/bm25.py
 from rank_bm25 import BM25Plus
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional, Union
 import re
 import numpy as np
 import time
@@ -61,7 +62,7 @@ class BM25Scorer:
     
     def fit(self, documents: List[str]) -> 'BM25Scorer':
         """
-        Process a corpus of documents and create the BM25Plus model with progress reporting.
+        Process a corpus of documents and create the BM25Plus model.
         
         Args:
             documents: List of document strings
@@ -69,11 +70,15 @@ class BM25Scorer:
         Returns:
             Self (for method chaining)
         """
+        if not documents:
+            self._print_progress("WARNING: Empty document list provided")
+            return self
+            
         start_time = time.time()
         self._print_progress(f"Starting to process {len(documents)} documents")
         
         # Check for empty documents
-        empty_docs = [i for i, doc in enumerate(documents) if not doc.strip()]
+        empty_docs = [i for i, doc in enumerate(documents) if not doc or not doc.strip()]
         if empty_docs:
             self._print_progress(f"WARNING: Found {len(empty_docs)} empty documents. This may affect scoring.")
             if len(empty_docs) <= 5:
@@ -87,6 +92,11 @@ class BM25Scorer:
         
         if self.verbose:
             for doc_idx, doc in enumerate(tqdm(documents, desc="Tokenizing", unit="doc")):
+                if not doc:
+                    # Handle None or empty string
+                    self.corpus_tokenized.append([])
+                    continue
+                    
                 tokens = self.tokenize(doc)
                 self.corpus_tokenized.append(tokens)
                 
@@ -94,7 +104,7 @@ class BM25Scorer:
                 if not tokens and doc.strip():
                     self._print_progress(f"WARNING: Document {doc_idx} tokenized to empty list: '{doc[:50]}...'")
         else:
-            self.corpus_tokenized = [self.tokenize(doc) for doc in documents]
+            self.corpus_tokenized = [self.tokenize(doc) if doc else [] for doc in documents]
         
         # Check for empty token lists
         empty_token_docs = [i for i, tokens in enumerate(self.corpus_tokenized) if not tokens]
@@ -113,20 +123,35 @@ class BM25Scorer:
         if not self.corpus_tokenized:
             self._print_progress("ERROR: No documents to index!")
             return self
+            
         if all(not tokens for tokens in self.corpus_tokenized):
             self._print_progress("ERROR: All documents tokenized to empty lists!")
             return self
         
-        self.bm25 = BM25Plus(
-            self.corpus_tokenized, 
-            k1=self.k1, 
-            b=self.b, 
-            delta=self.delta
-        )
+        try:
+            self.bm25 = BM25Plus(
+                self.corpus_tokenized, 
+                k1=self.k1, 
+                b=self.b, 
+                delta=self.delta
+            )
+            
+            index_time = time.time() - index_start_time
+            self._print_progress(f"BM25Plus index built in {index_time:.2f} seconds")
+        except Exception as e:
+            self._print_progress(f"ERROR building BM25Plus index: {str(e)}")
+            return self
         
-        index_time = time.time() - index_start_time
-        self._print_progress(f"BM25Plus index built in {index_time:.2f} seconds")
+        # Report statistics
+        self._report_corpus_statistics()
         
+        total_time = time.time() - start_time
+        self._print_progress(f"Total processing time: {total_time:.2f} seconds")
+        
+        return self
+    
+    def _report_corpus_statistics(self):
+        """Report statistics about the corpus and vocabulary."""
         # Report on vocabulary size and document statistics
         vocab = set()
         token_counts = []
@@ -135,7 +160,6 @@ class BM25Scorer:
             token_counts.append(len(doc))
         
         # Compute vocabulary statistics
-        total_time = time.time() - start_time
         self._print_progress(f"Fitting complete. Vocabulary size: {len(vocab)} unique terms")
         
         if token_counts:
@@ -158,10 +182,6 @@ class BM25Scorer:
             self._print_progress("Top 10 most frequent terms in corpus:")
             for term, count in top_terms:
                 self._print_progress(f"  '{term}' appears in {count}/{len(self.corpus_tokenized)} documents")
-        
-        self._print_progress(f"Total processing time: {total_time:.2f} seconds")
-        
-        return self
     
     def score(self, query: str, doc_idx: int) -> float:
         """
@@ -176,6 +196,9 @@ class BM25Scorer:
         """
         if self.bm25 is None:
             raise ValueError("BM25Scorer has not been initialized with documents. Call fit() first.")
+        
+        if doc_idx < 0 or doc_idx >= len(self.original_documents):
+            raise ValueError(f"Document index {doc_idx} is out of range (0-{len(self.original_documents)-1})")
         
         # Tokenize the query
         self._print_progress(f"Scoring document {doc_idx} for query: '{query}'")
@@ -271,6 +294,32 @@ class BM25Scorer:
         
         return sorted_docs
     
+    def batch_score(self, documents: List[str], queries: List[str]) -> Dict[str, List[Tuple[int, float]]]:
+        """
+        Score multiple queries against their respective document collections.
+        
+        Args:
+            documents: List of lists of documents, where each inner list corresponds to a query
+            queries: List of queries, matching the document collections
+            
+        Returns:
+            Dictionary mapping queries to their score results
+        """
+        if len(documents) != len(queries):
+            raise ValueError(f"Number of document collections ({len(documents)}) must match number of queries ({len(queries)})")
+        
+        results = {}
+        for i, (query, docs) in enumerate(zip(queries, documents)):
+            self._print_progress(f"Processing query {i+1}/{len(queries)}: '{query}'")
+            
+            # Fit the model with the documents for this query
+            self.fit(docs)
+            
+            # Score the query against the documents
+            results[query] = self.score_all(query)
+        
+        return results
+    
     def search(self, query: str, top_n: int = 5) -> List[Dict[str, Any]]:
         """
         Search for documents matching a query and return the top results.
@@ -299,7 +348,7 @@ class BM25Scorer:
             {
                 "document_idx": idx,
                 "score": score,
-                "text": self.original_documents[idx]
+                "text": self.original_documents[idx] if idx < len(self.original_documents) else None
             }
             for idx, score in top_results
             if score > 0  # Only include documents with positive scores
@@ -309,3 +358,25 @@ class BM25Scorer:
         self._print_progress(f"Search completed in {total_time:.4f} seconds. Found {len(results)} relevant documents.")
         
         return results
+
+
+# Helper function to create a BM25Scorer and calculate scores for multiple datasets
+def batch_calculate_bm25_scores(keyword_docs_map: Dict[str, List[str]]) -> Dict[str, List[Tuple[int, float]]]:
+    """
+    Calculate BM25 scores for multiple keywords and their document collections.
+    
+    Args:
+        keyword_docs_map: Dictionary mapping keywords to their document collections
+        
+    Returns:
+        Dictionary mapping keywords to their score results
+    """
+    scorer = BM25Scorer()
+    results = {}
+    
+    for i, (keyword, docs) in enumerate(keyword_docs_map.items()):
+        print(f"Processing keyword {i+1}/{len(keyword_docs_map)}: '{keyword}'")
+        scorer.fit(docs)
+        results[keyword] = scorer.score_all(keyword)
+    
+    return results

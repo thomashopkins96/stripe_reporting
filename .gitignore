@@ -10,3 +10,5 @@
 /token.json
 /_unittest.py
 /__pycache__
+*__pycache__*
+content_from_sf
